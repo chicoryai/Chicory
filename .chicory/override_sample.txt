@@ -1,0 +1,2 @@
+path/sql_file1.sql
+path2/sql_file2.sql
