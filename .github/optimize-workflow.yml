@@ -1,0 +1,112 @@
+name: Containerize and Parse [Chicory.AI v0.0.1]
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-optimize:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v4
+
+    - name: Filter Changed Files
+      id: filter
+      uses: dorny/paths-filter@v3
+      with:
+        list-files: 'escape'
+        filters: |
+          src:
+            - '**/*.py'
+            - '**/*.sql'
+    
+    - name: Load Queries and Results
+      id: cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          .chicory/query.json
+          results.json
+        key: arabica-cache-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          arabica-cache-${{ github.repository }}-
+
+    - name: Run Container & Parse Files
+      if: steps.filter.outputs.src == 'true'
+      run: |
+        if [ -f .chicory/query.json ]; then
+          cp .chicory/query.json last_query.json
+        fi
+
+        CHANGED_FILES=$(echo '${{ steps.filter.outputs.src_files }}' | tr ' ' '\n')
+        if [ -f ".chicory/override.txt" ]; then
+          echo "::debug:: overriding changed files"
+          while read -r line; do
+            trimmed_line=$(echo $line | tr -d ' ')
+            echo "::debug:: checking override file $line"
+            if [ -f "$trimmed_line" ]; then
+              echo "::debug:: override file $trimmed_line exists"
+              if [[ $CHANGED_FILES != *"$trimmed_line"* ]]; then
+                echo "::debug::Adding unchanged file from override $trimmed_line"
+                CHANGED_FILES="$CHANGED_FILES"$'\n'"$trimmed_line"
+              fi
+            fi
+          done < ".chicory/override.txt"
+        fi
+        echo "::debug::$CHANGED_FILES"
+        # Pass the list of changed files to your container/script
+        docker run --name sql-ci -di carbonarahub/sql-extractor:prod
+        WORKING_DIRECTORY=$(docker inspect --format='{{.Config.WorkingDir}}' sql-ci)
+        for file in $CHANGED_FILES
+        do
+          echo "::debug:: $file"
+          if [ -f "$file" ]; then
+            echo "::debug:: exists and copying"
+            docker cp $file sql-ci:$WORKING_DIRECTORY/
+          fi
+        done
+        
+        if [ -f last_query.json ]; then
+          docker cp last_query.json sql-ci:$WORKING_DIRECTORY/
+          docker exec sql-ci python3 sql_extractor.py $CHANGED_FILES -p last_query.json
+          docker cp sql-ci:$WORKING_DIRECTORY/query_diff.json query.json
+        else
+            echo "::debug:: first run"
+            docker exec sql-ci python3 sql_extractor.py $CHANGED_FILES
+            docker cp sql-ci:$WORKING_DIRECTORY/query.json query.json
+        fi
+        docker cp sql-ci:$WORKING_DIRECTORY/query.json .chicory/query.json
+        docker cp sql-ci:$WORKING_DIRECTORY/action_comment.js action_comment.js
+        
+        # Check if .chicory/query.json exists
+        if [ ! -f .chicory/query.json ]; then
+          echo "::debug:: .chicory/query.json does not exist. Failing the step."
+          exit 1
+        fi
+
+    - name: Install Dependencies
+      run: npm install axios
+
+    - name: Process/Analyse Queries and Add Comments
+      id: api_url
+      uses: actions/github-script@v7
+      env:
+        CHICORY_TOKEN: ${{ secrets.CHICORY_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        script: |
+          const script = require('./action_comment.js');
+          await script({ github, context, core, api_key: process.env.CHICORY_TOKEN});
+
+    - name: Create or Update Webhook
+      run: |
+        curl -X POST \
+          -H "Authorization: token $CHICORY_PAT_WITH_ADMIN_REPO_HOOK" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/hooks \
+          -d '{"config": {"url": "https://api.chicory.ai/feedback-webhook", "content_type": "json"}, "events": ["pull_request_review_comment", "pull_request_review"], "active": true}'
+      env:
+        CHICORY_PAT_WITH_ADMIN_REPO_HOOK: ${{ secrets.CHICORY_PAT_WITH_ADMIN_REPO_HOOK }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
