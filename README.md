@@ -1,4 +1,4 @@
-# Arabica
+# Chicory AI
 
 This project aims to analyze SparkSQL queries within a Spark Python project to provide optimization recommendations. It leverages Large Language Models (LLM) for analysis and real-time metadata from a database (DB) for context, such as Data Definition Language (DDL) and statistics. The goal is to enhance the efficiency and performance of SparkSQL queries by offering actionable insights.
 
